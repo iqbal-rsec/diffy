@@ -35,10 +35,10 @@ class HttpLifter(settings: Settings) {
   }
 
   def liftRequest(req: HttpRequest): Message = {
-    val headers = req.getMessage.getHeaders.asScala.toMap
+    val headers = req.getMessage.getHeaders.asScala.toMap.map(e => (e._1.toLowerCase, e._2))
 
     val canonicalResource: Option[String] = headers
-      .get("Canonical-Resource")
+      .get("canonical-resource")
       .orElse(resourceMatcher.flatMap(_.resourceName(req.getPath)))
 
     val params = req.getParams

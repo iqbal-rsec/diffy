@@ -1,13 +1,13 @@
 package ai.diffy
 
 import ai.diffy.analysis.{DifferencesFilterFactory, JoinedEndpoint}
-import ai.diffy.proxy.ReactorHttpDifferenceProxy
+import ai.diffy.proxy.{HttpDifferenceProxy}
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.web.bind.annotation.{GetMapping, PathVariable, RequestParam, RestController}
 
 @RestController
 class ApiController(
-   @Autowired proxy: ReactorHttpDifferenceProxy,
+   @Autowired proxy: HttpDifferenceProxy,
    @Autowired settings: Settings)
 {
   val MissingEndpointException = Renderer.error("Specify an endpoint")
