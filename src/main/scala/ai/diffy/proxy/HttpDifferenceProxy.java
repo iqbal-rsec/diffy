@@ -147,9 +147,9 @@ public class HttpDifferenceProxy {
             currTime = System.currentTimeMillis();
 
             Message r = lifter.liftRequest(request);
-            Message c = lifter.liftResponse(toResponse(primaryResponse));
-            Message p = lifter.liftResponse(toResponse(secondaryResponse));
-            Message s = lifter.liftResponse(toResponse(candidateResponse));
+            Message c = lifter.liftResponse(toResponse(candidateResponse));
+            Message p = lifter.liftResponse(toResponse(primaryResponse));
+            Message s = lifter.liftResponse(toResponse(secondaryResponse));
             analyzer.apply(r, c, p, s);
 
             log.info("time to analyze differences {} seconds", (System.currentTimeMillis() - currTime) / 1000.0);
