@@ -122,8 +122,7 @@ public class HttpDifferenceProxy {
             // build request
             HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .method(method, HttpRequest.BodyPublishers.ofString(requestBody));
-            exchange.getRequestHeaders()
-                .forEach((key, value1) -> value1.forEach(value -> builder.header(key, value)));
+            copyRequestFields(builder,  exchange.getRequestHeaders());
 
             log.info("time to prepare requests {} seconds", (System.currentTimeMillis() - currTime) / 1000.0);
             currTime = System.currentTimeMillis();
@@ -179,9 +178,8 @@ public class HttpDifferenceProxy {
                 default:
                     resp = primaryResponse;
             }
-            
 
-            copyFields(exchange.getResponseHeaders(), resp.headers());
+            copyResponseFields(exchange.getResponseHeaders(), resp.headers());
             exchange.getResponseHeaders().add("Via", "1.1 diffy");
 
             byte[] bytes = resp.body();
@@ -231,11 +229,22 @@ public class HttpDifferenceProxy {
         return new ai.diffy.proxy.HttpResponse(status, msg);
     }
 
+    static HashSet<String> requestNotCopyFields = new HashSet<String>(Arrays.asList(
+        "Accept-encoding"
+    ));
+    private void copyRequestFields(HttpRequest.Builder builder, com.sun.net.httpserver.Headers requestHeader) {
+        requestHeader.forEach((fieldName, fieldValues) -> {
+            if (!requestNotCopyFields.contains(fieldName)) {
+                fieldValues.forEach((fieldValue) -> builder.header(fieldName, fieldValue));
+            }
+        });
+    }
+
     static HashSet<String> notCopyFields = new HashSet<String>(Arrays.asList(
         "Date",
         "Content-length"
     ));
-    private void copyFields(com.sun.net.httpserver.Headers headers, java.net.http.HttpHeaders responseHeaders) {
+    private void copyResponseFields(com.sun.net.httpserver.Headers headers, java.net.http.HttpHeaders responseHeaders) {
         responseHeaders.map().forEach((fieldName, fieldValues) -> {
             if (!notCopyFields.contains(fieldName)) {
                 fieldValues.forEach((fieldValue) -> headers.add(fieldName, fieldValue));
