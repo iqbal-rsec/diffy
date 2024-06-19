@@ -133,28 +133,42 @@ public class HttpDifferenceProxy {
                 settings.secondaryPort());
             HttpRequest candidateRequest = buildRequest(builder, uri, settings.candidateHost(),
                 settings.candidatePort());
-            CompletableFuture<HttpResponse<String>> primaryResponseFuture = client.sendAsync(primaryRequest,
-                HttpResponse.BodyHandlers.ofString());
-            CompletableFuture<HttpResponse<String>> secondaryResponseFuture = client.sendAsync(secondaryRequest,
-                HttpResponse.BodyHandlers.ofString());
-            CompletableFuture<HttpResponse<String>> candidateResponseFuture = client.sendAsync(candidateRequest,
-                HttpResponse.BodyHandlers.ofString());
-            HttpResponse<String> primaryResponse = primaryResponseFuture.join();
-            HttpResponse<String> secondaryResponse = secondaryResponseFuture.join();
-            HttpResponse<String> candidateResponse = candidateResponseFuture.join();
+            CompletableFuture<HttpResponse<byte[]>> primaryResponseFuture = client.sendAsync(primaryRequest,
+                HttpResponse.BodyHandlers.ofByteArray());
+            CompletableFuture<HttpResponse<byte[]>> secondaryResponseFuture = client.sendAsync(secondaryRequest,
+                HttpResponse.BodyHandlers.ofByteArray());
+            CompletableFuture<HttpResponse<byte[]>> candidateResponseFuture = client.sendAsync(candidateRequest,
+                HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<byte[]> primaryResponse = primaryResponseFuture.join();
+            HttpResponse<byte[]> secondaryResponse = secondaryResponseFuture.join();
+            HttpResponse<byte[]> candidateResponse = candidateResponseFuture.join();
 
-            log.info("time to receive responses {} seconds", (System.currentTimeMillis() - currTime) / 1000.0);
-            currTime = System.currentTimeMillis();
+            java.net.http.HttpHeaders pH = primaryResponse.headers();
+            Optional<String> ct = pH.firstValue("Content-type");
 
-            Message r = lifter.liftRequest(request);
-            Message c = lifter.liftResponse(toResponse(candidateResponse));
-            Message p = lifter.liftResponse(toResponse(primaryResponse));
-            Message s = lifter.liftResponse(toResponse(secondaryResponse));
-            analyzer.apply(r, c, p, s);
+            boolean isText = false;
+            if (ct.isPresent()) {
+                if (ct.get().contains("text")) {
+                    isText = true;
+                }
+            }
+            else {
+                isText = true;
+            }
+            if (isText) {
+                log.info("time to receive responses {} seconds", (System.currentTimeMillis() - currTime) / 1000.0);
+                currTime = System.currentTimeMillis();
 
-            log.info("time to analyze differences {} seconds", (System.currentTimeMillis() - currTime) / 1000.0);
+                Message r = lifter.liftRequest(request);
+                Message c = lifter.liftResponse(toResponseB(candidateResponse));
+                Message p = lifter.liftResponse(toResponseB(primaryResponse));
+                Message s = lifter.liftResponse(toResponseB(secondaryResponse));
+                analyzer.apply(r, c, p, s);
 
-            HttpResponse<String> resp;
+                log.info("time to analyze differences {} seconds", (System.currentTimeMillis() - currTime) / 1000.0);
+            }
+
+            HttpResponse<byte[]> resp;
             switch (settings.responseMode().name()) {
                 case "candidate":
                     resp = candidateResponse;
@@ -165,10 +179,16 @@ public class HttpDifferenceProxy {
                 default:
                     resp = primaryResponse;
             }
-            exchange.sendResponseHeaders(resp.statusCode(), resp.body().length());
-            exchange.getResponseHeaders().putAll(resp.headers().map());
+            
+
+            copyFields(exchange.getResponseHeaders(), resp.headers());
+            exchange.getResponseHeaders().add("Via", "1.1 diffy");
+
+            byte[] bytes = resp.body();
+            exchange.sendResponseHeaders(resp.statusCode(), bytes.length);
+            
             OutputStream os = exchange.getResponseBody();
-            os.write(resp.body().getBytes());
+            os.write(bytes);
             os.close();
         } catch (Exception e) {
             e.printStackTrace();
@@ -203,6 +223,24 @@ public class HttpDifferenceProxy {
         String status = Objects.requireNonNull(HttpStatus.resolve(response.statusCode())).toString();
         HttpMessage msg = new HttpMessage(toHeaders(response.headers()), response.body());
         return new ai.diffy.proxy.HttpResponse(status, msg);
+    }
+
+    private ai.diffy.proxy.HttpResponse toResponseB(HttpResponse<byte[]> response) {
+        String status = Objects.requireNonNull(HttpStatus.resolve(response.statusCode())).toString();
+        HttpMessage msg = new HttpMessage(toHeaders(response.headers()), new String(response.body(), StandardCharsets.UTF_8));
+        return new ai.diffy.proxy.HttpResponse(status, msg);
+    }
+
+    static HashSet<String> notCopyFields = new HashSet<String>(Arrays.asList(
+        "Date",
+        "Content-length"
+    ));
+    private void copyFields(com.sun.net.httpserver.Headers headers, java.net.http.HttpHeaders responseHeaders) {
+        responseHeaders.map().forEach((fieldName, fieldValues) -> {
+            if (!notCopyFields.contains(fieldName)) {
+                fieldValues.forEach((fieldValue) -> headers.add(fieldName, fieldValue));
+            }
+        });
     }
 
     public void clear() {
