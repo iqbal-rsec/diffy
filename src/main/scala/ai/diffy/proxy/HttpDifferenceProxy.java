@@ -29,6 +29,8 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -51,6 +53,19 @@ public class HttpDifferenceProxy {
     private final HttpClient client;
     volatile public Date lastReset = new Date();
     private HttpServer server;
+
+    private static class SessionInfo {
+        public SessionInfo() {
+            sessionId = null;
+            cookies = new HashMap<String, String>();
+        }
+        public String sessionId;
+        public HashMap<String, String> cookies;
+    };
+
+    private static final SessionInfo primarySession = new SessionInfo();
+    private static final SessionInfo secondarySession = new SessionInfo();
+    private static final SessionInfo candidateSession = new SessionInfo();
 
     public HttpDifferenceProxy(@Autowired Settings settings) {
         this.settings = settings;
@@ -122,16 +137,16 @@ public class HttpDifferenceProxy {
             // build request
             HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .method(method, HttpRequest.BodyPublishers.ofString(requestBody));
-            copyRequestFields(builder,  exchange.getRequestHeaders());
+            copyRequestFields(builder, exchange.getRequestHeaders());
 
             log.info("time to prepare requests {} seconds", (System.currentTimeMillis() - currTime) / 1000.0);
             currTime = System.currentTimeMillis();
 
-            HttpRequest primaryRequest = buildRequest(builder, uri, settings.primaryHost(), settings.primaryPort());
+            HttpRequest primaryRequest = buildRequest(builder, uri, settings.primaryHost(), settings.primaryPort(), primarySession);
             HttpRequest secondaryRequest = buildRequest(builder, uri, settings.secondaryHost(),
-                settings.secondaryPort());
+                settings.secondaryPort(), secondarySession);
             HttpRequest candidateRequest = buildRequest(builder, uri, settings.candidateHost(),
-                settings.candidatePort());
+                settings.candidatePort(), candidateSession);
             CompletableFuture<HttpResponse<byte[]>> primaryResponseFuture = client.sendAsync(primaryRequest,
                 HttpResponse.BodyHandlers.ofByteArray());
             CompletableFuture<HttpResponse<byte[]>> secondaryResponseFuture = client.sendAsync(secondaryRequest,
@@ -142,12 +157,30 @@ public class HttpDifferenceProxy {
             HttpResponse<byte[]> secondaryResponse = secondaryResponseFuture.join();
             HttpResponse<byte[]> candidateResponse = candidateResponseFuture.join();
 
-            java.net.http.HttpHeaders pH = primaryResponse.headers();
-            Optional<String> ct = pH.firstValue("Content-type");
+            updateSessionInfo(primarySession, method, primaryResponse);
+            updateSessionInfo(secondarySession, method, secondaryResponse);
+            updateSessionInfo(candidateSession, method, candidateResponse);
+
+            HttpResponse<byte[]> resp;
+            switch (settings.responseMode().name()) {
+                case "candidate":
+                    resp = candidateResponse;
+                    break;
+                case "secondary":
+                    resp = secondaryResponse;
+                    break;
+                default:
+                    resp = primaryResponse;
+            }
+
+            java.net.http.HttpHeaders pH = resp.headers();
+            Optional<String> contentType = pH.firstValue("Content-type");
+
+            List<String> setCookies = pH.allValues("Set-cookie");
 
             boolean isText = false;
-            if (ct.isPresent()) {
-                if (ct.get().contains("text")) {
+            if (contentType.isPresent()) {
+                if (contentType.get().contains("text")) {
                     isText = true;
                 }
             }
@@ -165,18 +198,6 @@ public class HttpDifferenceProxy {
                 analyzer.apply(r, c, p, s);
 
                 log.info("time to analyze differences {} seconds", (System.currentTimeMillis() - currTime) / 1000.0);
-            }
-
-            HttpResponse<byte[]> resp;
-            switch (settings.responseMode().name()) {
-                case "candidate":
-                    resp = candidateResponse;
-                    break;
-                case "secondary":
-                    resp = secondaryResponse;
-                    break;
-                default:
-                    resp = primaryResponse;
             }
 
             copyResponseFields(exchange.getResponseHeaders(), resp.headers());
@@ -198,10 +219,20 @@ public class HttpDifferenceProxy {
         }
     }
 
-    private HttpRequest buildRequest(HttpRequest.Builder builder, URI originalUri, String host, int port) throws URISyntaxException {
+    private HttpRequest buildRequest(HttpRequest.Builder builder, URI originalUri, String host, int port, SessionInfo info) throws URISyntaxException {
         String scheme = originalUri.getScheme() == null ? "http" : originalUri.getScheme();
+        String path = originalUri.getPath();
+        String query = originalUri.getQuery();
+        if (info.sessionId != null) {
+            if (query != null) {
+                query = query.replaceAll("BV_SessionID=[a-zA-Z0-9\\.\\-]+", "BV_SessionID=" + info.sessionId);
+            }
+            path = path.replaceAll("BV_SessionID=[a-zA-Z0-9\\.\\-]+", "BV_SessionID=" + info.sessionId);
+        }
         URI uri = new URI(
-            scheme, "", host, port, originalUri.getPath(), originalUri.getQuery(), originalUri.getFragment());
+            scheme, "", host, port, path, query, originalUri.getFragment());
+
+        setCookie(builder, info);
         return builder.uri(uri).build();
     }
 
@@ -250,6 +281,42 @@ public class HttpDifferenceProxy {
                 fieldValues.forEach((fieldValue) -> headers.add(fieldName, fieldValue));
             }
         });
+    }
+
+    private void updateSessionInfo(SessionInfo info, String method, HttpResponse<byte[]> resp) {
+        java.net.http.HttpHeaders headers = resp.headers();
+        List<String> setCookies = headers.allValues("Set-cookie");
+        setCookies.forEach((setCookie) -> {
+            String[] cookie = setCookie.split(";");
+            for (int i = 0; i < cookie.length; i++) {
+                String elem = cookie[i];
+                String[] s = elem.split("=");
+
+                if (s.length == 2) {
+                    info.cookies.put(s[0].trim(), s[1].trim());
+                    break; // Ignore everything else
+                }
+            }
+        });
+
+        if (method.equalsIgnoreCase("post")) {
+            String body = new String(resp.body(), StandardCharsets.UTF_8);
+
+            Pattern p = Pattern.compile(".+location\\.href = \".+BV_SessionID=([a-zA-Z0-9\\.\\-]+).+", Pattern.MULTILINE | Pattern.DOTALL);
+            Matcher m = p.matcher(body);
+            boolean b = m.matches();
+            if (m.matches()) {
+                info.sessionId = m.group(1);
+                log.info("Session updated: " + info.sessionId);
+            }
+        }
+    }
+    private void setCookie(HttpRequest.Builder builder, SessionInfo info) {
+        String[] cookie = { "" };
+        info.cookies.forEach((key, value) -> {
+            cookie[0] += key + "=" + value + ";";
+        });
+        builder.setHeader("Cookie", cookie[0]);
     }
 
     public void clear() {
